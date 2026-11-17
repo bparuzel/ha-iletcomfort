@@ -17,7 +17,8 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
 from .coordinator import ILetComfortCoordinator
-from .entity import build_device_info
+from .entity import build_device_info, remove_stale_entities
+from .model_profiles import atw_c3_basic
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -62,9 +63,18 @@ async def async_setup_entry(
 ) -> None:
     """Set up binary sensor entities."""
     coordinator: ILetComfortCoordinator = hass.data[DOMAIN][entry.entry_id]
+    descriptions = BINARY_SENSOR_DESCRIPTIONS
+    status = (coordinator.data or {}).get("status")
+    if atw_c3_basic(coordinator.sn8, status) is not None:
+        # No compressor/IBH running signal in the C3 basic layout.
+        descriptions = tuple(d for d in descriptions if d.key == "error")
+        remove_stale_entities(
+            hass, coordinator, "binary_sensor",
+            (d.key for d in BINARY_SENSOR_DESCRIPTIONS if d.key != "error"),
+        )
     async_add_entities(
         ILetComfortBinarySensor(coordinator, description)
-        for description in BINARY_SENSOR_DESCRIPTIONS
+        for description in descriptions
     )
 
 

@@ -14,7 +14,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from .c3_basic import BODY_ECO, BODY_SILENCE, C3BasicStatus
 from .const import DOMAIN
 from .coordinator import ILetComfortCoordinator
-from .entity import build_device_info
+from .entity import build_device_info, remove_stale_entities
 from .model_profiles import atw_c3_basic
 
 
@@ -28,6 +28,7 @@ async def async_setup_entry(
     status = (coordinator.data or {}).get("status")
     if atw_c3_basic(coordinator.sn8, status) is not None:
         # The legacy Boost write/state do not apply to the C3 basic layout.
+        remove_stale_entities(hass, coordinator, "switch", ["boost"])
         async_add_entities(
             [
                 ILetComfortC3CurveSwitch(coordinator),

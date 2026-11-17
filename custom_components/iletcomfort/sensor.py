@@ -26,7 +26,8 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
 from .coordinator import ILetComfortCoordinator
-from .entity import build_device_info
+from .entity import build_device_info, remove_stale_entities
+from .model_profiles import atw_c3_basic
 from .error_codes import ERROR_CODES
 
 
@@ -185,6 +186,10 @@ SENSOR_DESCRIPTIONS: tuple[ILetComfortSensorDescription, ...] = (
 )
 
 
+# Readings the C3 basic status frame actually carries (sn8 171H120F).
+C3_BASIC_SENSOR_KEYS = frozenset({"dhw_tank", "error_code"})
+
+
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: ConfigEntry,
@@ -192,9 +197,21 @@ async def async_setup_entry(
 ) -> None:
     """Set up sensor entities."""
     coordinator: ILetComfortCoordinator = hass.data[DOMAIN][entry.entry_id]
+    descriptions = SENSOR_DESCRIPTIONS
+    status = (coordinator.data or {}).get("status")
+    if atw_c3_basic(coordinator.sn8, status) is not None:
+        # The C3 basic layout only carries these readings; the rest would be
+        # permanently unknown or fabricated zeros.
+        descriptions = tuple(
+            d for d in SENSOR_DESCRIPTIONS if d.key in C3_BASIC_SENSOR_KEYS
+        )
+        remove_stale_entities(
+            hass, coordinator, "sensor",
+            (d.key for d in SENSOR_DESCRIPTIONS if d.key not in C3_BASIC_SENSOR_KEYS),
+        )
     async_add_entities(
         ILetComfortSensor(coordinator, description)
-        for description in SENSOR_DESCRIPTIONS
+        for description in descriptions
     )
 
 

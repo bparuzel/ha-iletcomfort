@@ -144,3 +144,66 @@ def test_zero_error_code_has_no_fault_attributes(hass: HomeAssistant):
 
     assert sensor.native_value == 0
     assert sensor.extra_state_attributes == {}
+
+
+async def test_c3_basic_unit_only_gets_entities_it_can_read(hass: HomeAssistant):
+    """sn8 171H120F (C3 basic layout): no fabricated/always-unknown entities,
+    and stale ones from earlier versions are removed from the registry."""
+    from homeassistant.helpers import entity_registry as er
+
+    from custom_components.iletcomfort import (
+        binary_sensor,
+        climate,
+        select,
+        sensor,
+        switch,
+        water_heater,
+    )
+    from custom_components.iletcomfort.model_profiles import (
+        ATW_SN8,
+        decode_atw_status,
+    )
+
+    coord = _coordinator(hass)
+    coord.appliance_meta = {"sn8": ATW_SN8}
+    coord.data = {
+        "status": decode_atw_status(bytes.fromhex(
+            "01 08 15 a0 03 03 1d 1e 37 30 37 19 19 05 37 19 19 05 3c 22 3c 14 10 00 80"
+        )),
+        "sensors": ITSSensors(),
+    }
+    hass.data.setdefault(DOMAIN, {})[coord.entry.entry_id] = coord
+    registry = er.async_get(hass)
+    for platform, key in [
+        ("sensor", "total_energy"),
+        ("binary_sensor", "compressor_running"),
+        ("switch", "boost"),
+        ("select", "mute"),
+        ("sensor", "dhw_tank"),
+    ]:
+        registry.async_get_or_create(
+            platform, DOMAIN, f"APPL1_{key}", config_entry=coord.entry,
+        )
+
+    created: dict[str, list] = {}
+    for module in (sensor, binary_sensor, switch, select, climate, water_heater):
+        name = module.__name__.rsplit(".", 1)[-1]
+        await module.async_setup_entry(
+            hass, coord.entry, lambda ents, name=name: created.setdefault(name, []).extend(ents),
+        )
+
+    keys = {name: sorted(e.unique_id.removeprefix("APPL1_") for e in ents)
+            for name, ents in created.items()}
+    assert keys == {
+        "sensor": ["dhw_tank", "error_code"],
+        "binary_sensor": ["error"],
+        "switch": ["eco_mode", "silent_mode", "zone1_curve"],
+        "climate": ["climate"],
+        "water_heater": ["dhw"],
+    }
+    assert registry.async_get_entity_id("sensor", DOMAIN, "APPL1_total_energy") is None
+    assert registry.async_get_entity_id("binary_sensor", DOMAIN, "APPL1_compressor_running") is None
+    assert registry.async_get_entity_id("switch", DOMAIN, "APPL1_boost") is None
+    assert registry.async_get_entity_id("select", DOMAIN, "APPL1_mute") is None
+    # Entities that are still created keep their registry entry (history).
+    assert registry.async_get_entity_id("sensor", DOMAIN, "APPL1_dhw_tank") is not None
