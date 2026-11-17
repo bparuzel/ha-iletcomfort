@@ -31,6 +31,7 @@ from .model_profiles import (
     KJRH120L_TEMP_MAX,
     KJRH120L_TEMP_MIN,
     ModelProfile,
+    atw_c3_basic,
     atw_sensors_are_placeholder,
     kjrh120l_has_zone1,
     resolve_profile,
@@ -60,7 +61,11 @@ async def async_setup_entry(
 ) -> None:
     """Set up the climate entity."""
     coordinator: ILetComfortCoordinator = hass.data[DOMAIN][entry.entry_id]
-    async_add_entities([ILetComfortClimate(coordinator)])
+    status = (coordinator.data or {}).get("status")
+    if atw_c3_basic(coordinator.sn8, status) is not None:
+        async_add_entities([ILetComfortC3Climate(coordinator)])
+    else:
+        async_add_entities([ILetComfortClimate(coordinator)])
 
 
 class ILetComfortClimate(CoordinatorEntity[ILetComfortCoordinator], ClimateEntity):
@@ -224,3 +229,91 @@ class ILetComfortClimate(CoordinatorEntity[ILetComfortCoordinator], ClimateEntit
     async def async_turn_off(self) -> None:
         self._ensure_climate_control_supported()
         await self.coordinator.async_set_device(mode=MODE_OFF)
+
+
+class ILetComfortC3Climate(ILetComfortClimate):
+    """Zone-1 heating for C3 basic-layout units (sn8 171H120F).
+
+    Heat/Off is the Zone-1 power switch and the setpoint follows the zone's
+    temperature type, both written with the standard Midea C3 SET (see
+    ``c3_basic``). Same unique_id as the generic climate, so history is kept.
+    """
+
+    @property
+    def _basic(self):
+        return atw_c3_basic(self.coordinator.sn8, self._status)
+
+    @property
+    def available(self) -> bool:
+        return super().available and self._basic is not None
+
+    @property
+    def hvac_modes(self) -> list[HVACMode]:
+        return [HVACMode.OFF, HVACMode.HEAT]
+
+    @property
+    def hvac_mode(self) -> HVACMode:
+        basic = self._basic
+        if basic is None or not basic.zone1_power:
+            return HVACMode.OFF
+        return HVACMode.HEAT
+
+    @property
+    def supported_features(self) -> ClimateEntityFeature:
+        return self._attr_supported_features
+
+    @property
+    def current_temperature(self) -> float | None:
+        # The cloud exposes no live Zone-1 water/room reading for this model;
+        # the DHW tank temperature has its own sensor and water heater.
+        return None
+
+    @property
+    def target_temperature(self) -> float | None:
+        basic = self._basic
+        return basic.zone1_setpoint if basic is not None else None
+
+    @property
+    def target_temperature_step(self) -> float:
+        basic = self._basic
+        return basic.zone1_setpoint_step if basic is not None else 1.0
+
+    @property
+    def min_temp(self) -> float:
+        basic = self._basic
+        return basic.zone1_setpoint_range[0] if basic is not None else 25.0
+
+    @property
+    def max_temp(self) -> float:
+        basic = self._basic
+        return basic.zone1_setpoint_range[1] if basic is not None else 55.0
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        basic = self._basic
+        if basic is None:
+            return {}
+        return {
+            "weather_curve": basic.zone1_curve,
+            "temperature_type": "water" if basic.zone1_water_temp else "room",
+        }
+
+    async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
+        if hvac_mode not in (HVACMode.OFF, HVACMode.HEAT):
+            raise HomeAssistantError(f"Unsupported HVAC mode {hvac_mode}")
+        await self.coordinator.async_set_c3_basic(
+            zone1_power=hvac_mode is HVACMode.HEAT,
+        )
+
+    async def async_set_temperature(self, **kwargs: Any) -> None:
+        temp = kwargs.get(ATTR_TEMPERATURE)
+        if temp is None:
+            return
+        clamped = max(self.min_temp, min(float(temp), self.max_temp))
+        await self.coordinator.async_set_c3_basic(zone1_setpoint=clamped)
+
+    async def async_turn_on(self) -> None:
+        await self.async_set_hvac_mode(HVACMode.HEAT)
+
+    async def async_turn_off(self) -> None:
+        await self.async_set_hvac_mode(HVACMode.OFF)

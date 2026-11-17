@@ -439,6 +439,37 @@ class ILetComfortCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
         await self.async_request_refresh()
 
+    async def _async_c3_write(self, func: Callable[[], Any]) -> None:
+        """Run a C3 write with auto re-auth, surface errors, then refresh."""
+        if self._operation_mode == OPERATION_MODE_PHONE_APP:
+            raise HomeAssistantError(
+                "Control is disabled in phone app coexistence mode; "
+                "switch to HA primary mode to send commands"
+            )
+        try:
+            try:
+                await self.hass.async_add_executor_job(func)
+            except AuthError:
+                _LOGGER.info("Auth error during set, re-authenticating")
+                await self._async_login()
+                await self.hass.async_add_executor_job(func)
+        except (ApiError, AuthError, ValueError) as err:
+            raise HomeAssistantError(f"Heat pump command failed: {err}") from err
+        finally:
+            await self.async_request_refresh()
+
+    async def async_set_c3_basic(self, **changes: Any) -> None:
+        """Change C3 basic fields (zone1/DHW power, setpoints, curve)."""
+        await self._async_c3_write(
+            lambda: self.client.set_c3_basic(self.appliance_code, **changes)
+        )
+
+    async def async_set_c3_feature(self, body_type: int, on: bool) -> None:
+        """Switch the C3 silent (0x05) or ECO (0x07) mode."""
+        await self._async_c3_write(
+            lambda: self.client.set_c3_feature(self.appliance_code, body_type, on)
+        )
+
     # -- MQTT real-time push (issue #55, phone-app coexistence mode) --
 
     async def async_start_push(self) -> None:

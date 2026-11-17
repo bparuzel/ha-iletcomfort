@@ -480,6 +480,68 @@ async def test_phone_app_mode_rejects_account_control(hass: HomeAssistant):
     cls.return_value.set_device.assert_not_called()
 
 
+def _c3_coordinator(hass: HomeAssistant, entry: MockConfigEntry | None = None):
+    entry = entry or _entry(REGION_EU)
+    entry.add_to_hass(hass)
+    with patch("custom_components.iletcomfort.coordinator.ILetComfortClient") as cls:
+        coordinator = ILetComfortCoordinator(hass, entry)
+    coordinator.async_request_refresh = AsyncMock()
+    coordinator._async_login = AsyncMock()
+    return coordinator, cls.return_value
+
+
+async def test_c3_basic_write_forwards_changes_and_refreshes(hass: HomeAssistant):
+    coordinator, client = _c3_coordinator(hass)
+
+    await coordinator.async_set_c3_basic(dhw_target=54)
+
+    client.set_c3_basic.assert_called_once_with("APPL1", dhw_target=54)
+    coordinator.async_request_refresh.assert_awaited_once()
+
+
+async def test_c3_feature_write_reauths_once_on_evicted_session(hass: HomeAssistant):
+    coordinator, client = _c3_coordinator(hass)
+    client.set_c3_feature.side_effect = [AuthError("evicted"), {"sent": "x"}]
+
+    await coordinator.async_set_c3_feature(0x05, True)
+
+    coordinator._async_login.assert_awaited_once()
+    assert client.set_c3_feature.call_count == 2
+    assert client.set_c3_feature.call_args.args == ("APPL1", 0x05, True)
+
+
+@pytest.mark.parametrize(
+    "error", [ApiError("code=1214"), ValueError("DHW target 70 outside 20-60")]
+)
+async def test_c3_write_errors_surface_in_ha_and_still_refresh(
+    hass: HomeAssistant, error: Exception
+):
+    from homeassistant.exceptions import HomeAssistantError
+
+    coordinator, client = _c3_coordinator(hass)
+    client.set_c3_basic.side_effect = error
+
+    with pytest.raises(HomeAssistantError, match="Heat pump command failed"):
+        await coordinator.async_set_c3_basic(dhw_target=70)
+
+    coordinator.async_request_refresh.assert_awaited_once()
+
+
+async def test_c3_write_blocked_in_phone_app_mode(hass: HomeAssistant):
+    from homeassistant.exceptions import HomeAssistantError
+
+    from custom_components.iletcomfort.const import OPERATION_MODE_PHONE_APP
+
+    coordinator, client = _c3_coordinator(
+        hass, _entry_operation_mode(OPERATION_MODE_PHONE_APP)
+    )
+
+    with pytest.raises(HomeAssistantError, match="HA primary"):
+        await coordinator.async_set_c3_basic(zone1_power=True)
+
+    client.set_c3_basic.assert_not_called()
+
+
 def _degraded_coordinator(hass: HomeAssistant) -> tuple[ILetComfortCoordinator, MagicMock]:
     """Build a coordinator wired so both queries fall back to cache."""
     entry = _entry(REGION_US)

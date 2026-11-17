@@ -11,6 +11,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from .const import DOMAIN
 from .coordinator import ILetComfortCoordinator
 from .entity import build_device_info
+from .model_profiles import atw_c3_basic
 
 MUTE_OPTIONS = ["Off", "Level 1", "Level 2"]
 _MUTE_TO_API = {"Off": 0, "Level 1": 1, "Level 2": 2}
@@ -23,6 +24,10 @@ async def async_setup_entry(
 ) -> None:
     """Set up select entities."""
     coordinator: ILetComfortCoordinator = hass.data[DOMAIN][entry.entry_id]
+    status = (coordinator.data or {}).get("status")
+    if atw_c3_basic(coordinator.sn8, status) is not None:
+        # C3 basic-layout units get a Silent Mode switch instead (switch.py).
+        return
     async_add_entities([ILetComfortMuteSelect(coordinator)])
 
 

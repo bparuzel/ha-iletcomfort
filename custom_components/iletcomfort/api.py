@@ -294,6 +294,9 @@ class ITSStatus:
     fan_total_run_hours: int = 0
     # KJRH-120L dual variant's separate DHW target (status body[15], issue #5).
     kjrh120l_dhw_setpoint: float | None = None
+    # Standard Midea C3 basic status (``c3_basic.C3BasicStatus``) for profiles
+    # whose frame matches that layout (ATW / sn8 171H120F). None otherwise.
+    c3_basic: Any = None
     raw_body: bytes = field(default_factory=bytes, repr=False)
 
 
@@ -927,6 +930,55 @@ class ILetComfortClient:
             "effective_mode": eff_mode,
             "effective_temp": eff_temp,
         }
+
+    def _query_c3_body(self, appliance_code: str, body_type: int) -> bytearray:
+        """Send a C3 query for ``body_type`` and return the response body."""
+        from .c3_basic import build_c3_query
+
+        response_hex = self.send_hex_command(
+            appliance_code, build_c3_query(body_type),
+        )
+        _body_type, body = extract_c3_body(parse_hex_response(response_hex))
+        if not body or body[0] != body_type:
+            raise ApiError(
+                f"Unexpected response to C3 query 0x{body_type:02x}: "
+                f"{response_hex}"
+            )
+        return body
+
+    def set_c3_basic(self, appliance_code: str, **changes: Any) -> dict[str, Any]:
+        """Change C3 basic fields with a standard Midea C3 SET (sn8 171H120F).
+
+        Reads a fresh status, applies ``changes`` (see
+        ``c3_basic.apply_basic_changes``) and writes all fields back, so only
+        the requested ones change. Refuses to write when the current frame is
+        not a recognised C3 basic status.
+        """
+        from .c3_basic import apply_basic_changes, build_basic_set, decode_c3_basic
+
+        current = decode_c3_basic(self._query_c3_body(appliance_code, 0x01))
+        if current is None:
+            raise ApiError(
+                "Status frame is not a recognised C3 basic layout; refusing "
+                "to send a control command"
+            )
+        command = build_basic_set(apply_basic_changes(current, **changes))
+        _LOGGER.debug("set_c3_basic %s -> %s", changes, command)
+        response_hex = self.send_hex_command(appliance_code, command)
+        return {"sent": command, "response": response_hex}
+
+    def set_c3_feature(
+        self, appliance_code: str, body_type: int, on: bool,
+    ) -> dict[str, Any]:
+        """Switch C3 silent (0x05) or ECO (0x07) mode, keeping its schedule."""
+        from .c3_basic import build_feature_set
+
+        command = build_feature_set(
+            self._query_c3_body(appliance_code, body_type), on,
+        )
+        _LOGGER.debug("set_c3_feature 0x%02x on=%s -> %s", body_type, on, command)
+        response_hex = self.send_hex_command(appliance_code, command)
+        return {"sent": command, "response": response_hex}
 
     def _set_device_kjrh120l(
         self,

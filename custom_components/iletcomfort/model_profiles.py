@@ -56,6 +56,7 @@ import dataclasses
 from enum import Enum
 
 from .api import MODE_HEAT, MODE_OFF, ITSSensors, ITSStatus
+from .c3_basic import C3_MODE_COOL, C3BasicStatus, decode_c3_basic
 
 # sn8 model codes (8-char serial prefixes) → profile.
 ATW_SN8 = "171H120F"
@@ -212,6 +213,28 @@ def decode_atw_status(body: bytearray | bytes) -> ITSStatus:
     else:
         status.comp_running = False
 
+    # Standard Midea C3 basic layout (see c3_basic). It subsumes the per-variant
+    # mappings above: the setpoint follows the zone's temperature type (water →
+    # byte[6], room → byte[9]/2), and byte[1] bit0 is Zone-1 power (validated
+    # on Galmet #38 and Rotenso Aquami #124 hardware).
+    basic = decode_c3_basic(body)
+    if basic is not None:
+        status.c3_basic = basic
+        status.t5s_def = basic.zone1_setpoint
+        status.set_temperature = basic.dhw_target
+        status.box_bottom_temp = float(basic.dhw_tank_temp)
+        status.error_code = basic.error_code
+        if basic.zone1_power:
+            cool = basic.mode == C3_MODE_COOL
+            status.mode = 2 if cool else MODE_HEAT
+            status.mode_name = "Cool" if cool else "Heat"
+        else:
+            status.mode = MODE_OFF
+            status.mode_name = "Off"
+        # The basic frame carries no compressor/running signal.
+        status.comp_running = None
+        status.comp_frq = None
+
     return status
 
 
@@ -302,9 +325,25 @@ _ATW_PLACEHOLDER_SENSOR_FIELDS = {
 }
 
 
+# Rotenso Aquami, sn8 171H120F (issue #124): a shorter 38-byte variant of the
+# same template (subtype, a zero, then six ``03,1e,00,00,00,00`` groups),
+# captured while the official app showed live values elsewhere.
+_ATW_PLACEHOLDER_SENSORS_BODY_SHORT = b"\x02\x00" + b"\x03\x1e\x00\x00\x00\x00" * 6
+
+
 def atw_sensors_are_placeholder(raw_body: bytes) -> bool:
-    """Return whether an ATW sensor frame is the known non-telemetry template."""
-    return raw_body == _ATW_PLACEHOLDER_SENSORS_BODY
+    """Return whether an ATW sensor frame is a known non-telemetry template."""
+    return raw_body in (
+        _ATW_PLACEHOLDER_SENSORS_BODY,
+        _ATW_PLACEHOLDER_SENSORS_BODY_SHORT,
+    )
+
+
+def atw_c3_basic(sn8: str | None, status: ITSStatus | None) -> C3BasicStatus | None:
+    """Return the C3 basic status when ``sn8`` is ATW and the frame matches."""
+    if resolve_profile(sn8) is not ModelProfile.ATW or status is None:
+        return None
+    return status.c3_basic
 
 
 def kjrh120l_has_zone1(body: bytearray | bytes) -> bool:
@@ -462,6 +501,7 @@ __all__ = [
     "ModelProfile",
     "apply_profile_to_sensors",
     "apply_profile_to_status",
+    "atw_c3_basic",
     "atw_sensors_are_placeholder",
     "build_kjrh120l_set_temperature",
     "build_query_command",
